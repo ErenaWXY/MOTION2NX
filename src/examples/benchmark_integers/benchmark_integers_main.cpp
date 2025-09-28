@@ -105,8 +105,10 @@ int main(int ac, char* av[]) {
       auto comm_stats = party->get_communication_layer().get_transport_statistics();
       accumulated_comm_stats.add(comm_stats);
     }
-    std::cout << fmt::format(MOTION::ToString(comb.protocol_), ENCRYPTO::ToString(comb.op_type_),
-                             comb.bit_size_, comb.num_simd_);
+fmt::print("{} {} {} {}\n",
+           MOTION::ToString(comb.protocol_),
+           ENCRYPTO::ToString(comb.op_type_),
+           comb.bit_size_, comb.num_simd_);
     std::cout << MOTION::Statistics::print_stats(
         fmt::format("Protocol {} operation {} bit size {} SIMD {}",
                     MOTION::ToString(comb.protocol_), ENCRYPTO::ToString(comb.op_type_),
