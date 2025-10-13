@@ -34,6 +34,12 @@ class OTProviderManager;
 
 namespace MOTION {
 
+ struct PhaseObserver {
+  virtual ~PhaseObserver() = default;
+  virtual void on_preprocessing_done() {}
+  virtual void on_online_done() {}
+};
+
 class ArithmeticProviderManager;
 class BaseOTProvider;
 class CircuitLoader;
@@ -76,6 +82,7 @@ class TwoPartyBackend : public CircuitBuilder {
                   bool sync_between_setup_and_online, std::shared_ptr<Logger>);
   ~TwoPartyBackend();
 
+  void set_phase_observer(std::shared_ptr<PhaseObserver> obs);
   void run_preprocessing();
   void run();
 
@@ -85,6 +92,7 @@ class TwoPartyBackend : public CircuitBuilder {
   const Statistics::RunTimeStats& get_run_time_stats() const noexcept;
 
  private:
+  std::shared_ptr<PhaseObserver> phase_observer_;
   Communication::CommunicationLayer& comm_layer_;
   std::size_t my_id_;
   std::shared_ptr<Logger> logger_;

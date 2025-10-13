@@ -55,8 +55,24 @@ TwoPartyBackend::TwoPartyBackend(Communication::CommunicationLayer& comm_layer,
       logger_(logger),
       gate_register_(std::make_unique<GateRegister>()),
       gate_executor_(std::make_unique<NewGateExecutor>(
-          *gate_register_, [this] { run_preprocessing(); }, sync_between_setup_and_online,
-          [this] { comm_layer_.sync(); }, num_threads, logger_)),
+          *gate_register_,
+          // Preprocessing lambda: chạy setup; nếu KHÔNG có sync giữa setup/online,
+          // gọi observer ngay tại đây (mốc sau preprocessing).
+          [this, sync_between_setup_and_online] {
+            run_preprocessing();
+            if (!sync_between_setup_and_online) {
+              if (phase_observer_) phase_observer_->on_preprocessing_done();
+            }
+          },
+          // Cờ sync-between-setup-and-online (NewGateExecutor sẽ gọi sync_cb nếu true)
+          sync_between_setup_and_online,
+          // Sync lambda: thực hiện sync; NẾU có sync thì mốc "preprocessing done"
+          // được đặt NGAY SAU sync (trước khi vào online).
+          [this] {
+            comm_layer_.sync();
+            if (phase_observer_) phase_observer_->on_preprocessing_done();
+          },
+          num_threads, logger_)),
       circuit_loader_(std::make_unique<CircuitLoader>()),
       run_time_stats_(1),
       motion_base_provider_(std::make_unique<Crypto::MotionBaseProvider>(comm_layer_, logger_)),
@@ -93,6 +109,10 @@ TwoPartyBackend::TwoPartyBackend(Communication::CommunicationLayer& comm_layer,
 
 TwoPartyBackend::~TwoPartyBackend() = default;
 
+void TwoPartyBackend::set_phase_observer(std::shared_ptr<PhaseObserver> obs) {
+  phase_observer_ = std::move(obs);
+}
+
 void TwoPartyBackend::run_preprocessing() {
   run_time_stats_.back().record_start<Statistics::RunTimeStats::StatID::preprocessing>();
 
@@ -114,6 +134,7 @@ void TwoPartyBackend::run_preprocessing() {
 
 void TwoPartyBackend::run() {
   gate_executor_->evaluate_setup_online(run_time_stats_.back());
+  if (phase_observer_) phase_observer_->on_online_done();
 }
 
 std::optional<MPCProtocol> TwoPartyBackend::convert_via(MPCProtocol src_proto,

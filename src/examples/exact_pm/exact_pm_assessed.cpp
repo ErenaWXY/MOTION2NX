@@ -38,6 +38,7 @@ using NewWireP = std::shared_ptr<NewWire>;
 using WireVector = std::vector<NewWireP>;
 using namespace MOTION::proto::beavy;
 
+// ------------------------ Options ------------------------
 struct Options {
   std::size_t my_id{};
   MOTION::Communication::tcp_parties_config tcp_config;
@@ -50,32 +51,29 @@ struct Options {
   std::uint64_t ring_size{16};
   // generator
   bool alpha_patterns{true};
-  std::size_t num_patterns{1024}; // number of patterns (each length = pattern_size)
-  // seed
+  std::size_t num_patterns{1024};
+  // seeds
   uint64_t patt_seed{123456};
   uint64_t text_seed{654321};
 };
 
+// ------------------------ Helpers ------------------------
 static long get_rss_kb() {
-  // Prefer read /proc/self/status (VmRSS: <num> kB)
-  {
+  { // /proc/self/status → VmRSS
     std::ifstream f("/proc/self/status");
     if (f) {
       std::string line;
       while (std::getline(f, line)) {
         if (line.rfind("VmRSS:", 0) == 0) {
           std::istringstream iss(line);
-          std::string key, unit;
-          long value = -1;
-          iss >> key >> value >> unit; // key="VmRSS:", unit="kB"
+          std::string key, unit; long value = -1;
+          iss >> key >> value >> unit;
           if (value >= 0) return value; // kB
         }
       }
     }
   }
-
-  // Fallback 1: /proc/self/statm (resident pages * pagesize)
-  {
+  { // /proc/self/statm (resident pages * pagesize)
     std::ifstream f("/proc/self/statm");
     if (f) {
       long size_pages=-1, rss_pages=-1;
@@ -85,46 +83,40 @@ static long get_rss_kb() {
       }
     }
   }
-
-  // Fallback 2: getrusage (max RSS; on Linux is kB)
-  {
+  { // getrusage (max RSS; Linux: kB)
     struct rusage ru{};
-    if (getrusage(RUSAGE_SELF, &ru) == 0 && ru.ru_maxrss > 0) {
-      return ru.ru_maxrss; // kB
-    }
+    if (getrusage(RUSAGE_SELF, &ru) == 0 && ru.ru_maxrss > 0) return ru.ru_maxrss;
   }
   return -1;
 }
 
 struct CommDelta {
-  uint64_t bytes_sent;
-  uint64_t bytes_recv;
-  uint64_t msgs_sent;
-  uint64_t msgs_recv;
+  uint64_t bytes_sent{0};
+  uint64_t bytes_recv{0};
+  uint64_t msgs_sent{0};
+  uint64_t msgs_recv{0};
 };
 
-static uint64_t estimate_rounds_from_msgs(const CommDelta& c) {
+static CommDelta get_comm_delta_and_reset(MOTION::Communication::CommunicationLayer& cl) {
+  const auto stats_vec = cl.get_transport_statistics();
+  CommDelta c{};
+  for (const auto& s : stats_vec) {
+    c.bytes_sent += static_cast<uint64_t>(s.num_bytes_sent);
+    c.bytes_recv += static_cast<uint64_t>(s.num_bytes_received);
+    c.msgs_sent  += static_cast<uint64_t>(s.num_messages_sent);
+    c.msgs_recv  += static_cast<uint64_t>(s.num_messages_received);
+  }
+  cl.reset_transport_statistics();
+  return c;
+}
+
+static uint64_t rounds_from(const CommDelta& c) {
+  // Upper bound thô: một "round" ~ ít nhất 1 thông điệp mỗi chiều
   return std::max(c.msgs_sent, c.msgs_recv);
 }
 
-static CommDelta get_comm_delta_and_reset(MOTION::Communication::CommunicationLayer& cl) {
-  const auto stats_vec = cl.get_transport_statistics();  // vector<TransportStatistics>
-
-  uint64_t bytes_sent = 0, bytes_recv = 0, msgs_sent = 0, msgs_recv = 0;
-  for (const auto& s : stats_vec) {
-    bytes_sent += static_cast<uint64_t>(s.num_bytes_sent);
-    bytes_recv += static_cast<uint64_t>(s.num_bytes_received);
-    msgs_sent  += static_cast<uint64_t>(s.num_messages_sent);
-    msgs_recv  += static_cast<uint64_t>(s.num_messages_received);
-  }
-
-  cl.reset_transport_statistics();
-  return {bytes_sent, bytes_recv, msgs_sent, msgs_recv};
-}
-
 static std::string rand_alpha_str(std::size_t len, std::mt19937& rng) {
-  static constexpr char alphabet[] =
-      "abcdefghijklmnopqrstuvwxyz";
+  static constexpr char alphabet[] = "abcdefghijklmnopqrstuvwxyz";
   std::uniform_int_distribution<std::size_t> dist(0, sizeof(alphabet) - 2);
   std::string s; s.resize(len);
   for (std::size_t i = 0; i < len; ++i) s[i] = alphabet[dist(rng)];
@@ -147,12 +139,9 @@ static std::vector<std::shared_ptr<NewWire>> cast_wires(BooleanBEAVYWireVector& 
   return std::vector<std::shared_ptr<NewWire>>(std::begin(wires), std::end(wires));
 }
 
-// Secret-share-ish input preparation for the Boolean BEAVY HAM gate
 static WireVector make_boolean_inputs_for_pm(const Options& opt) {
   const auto num_simd = opt.text_size - opt.pattern_size + 1;
   const auto num_wires = opt.pattern_size * opt.ring_size;
-  std::cout << "num_simd: " << num_simd << "\n";
-  std::cout << "num_wires: " << num_wires << "\n";
   BooleanBEAVYWireVector wires;
   wires.reserve(num_wires);
   for (uint64_t j = 0; j < num_wires; ++j) {
@@ -168,10 +157,9 @@ static WireVector make_boolean_inputs_for_pm(const Options& opt) {
   return cast_wires(wires);
 }
 
-// Arithmetic BEAVY wire used in EQEXP
 static std::vector<MOTION::NewWireP> make_eqexp_rhs_wire(const Options& opt) {
-  const auto num_simd = opt.text_size - opt.pattern_size + 1; // number of the windows
-  const auto num_wires = opt.pattern_size * opt.ring_size; // 10 * 8 => 80
+  const auto num_simd = opt.text_size - opt.pattern_size + 1;
+  const auto num_wires = opt.pattern_size * opt.ring_size;
   auto wire = std::make_shared<ArithmeticBEAVYWire<uint64_t>>(num_simd);
   std::vector<uint64_t> x(num_simd, 2 * num_wires);
   wire->get_secret_share() = x;
@@ -185,8 +173,8 @@ static std::vector<MOTION::NewWireP> make_eqexp_rhs_wire(const Options& opt) {
 static std::unique_ptr<MOTION::Communication::CommunicationLayer>
 setup_communication(const Options& opt) {
   MOTION::Communication::TCPSetupHelper helper(opt.my_id, opt.tcp_config);
-  return std::make_unique<MOTION::Communication::CommunicationLayer>(opt.my_id,
-                                                                     helper.setup_connections());
+  return std::make_unique<MOTION::Communication::CommunicationLayer>(
+      opt.my_id, helper.setup_connections());
 }
 
 static void print_phase(const char* name,
@@ -200,10 +188,40 @@ static void print_phase(const char* name,
             << " | bytes_recv=" << c.bytes_recv
             << " | msgs_sent="  << c.msgs_sent
             << " | msgs_recv="  << c.msgs_recv
+            << " | rounds≈"     << rounds_from(c)
             << " | rss_kb="     << rss_kb
             << std::endl;
 }
 
+// Bóc số ms (cột "mean") từ bảng stats của MOTION
+static double extract_ms(const std::string& txt, const char* label) {
+  // Ví dụ: "Preprocessing Total   8151.048 ms      0.000 ms      0.000 ms"
+  std::regex re(std::string("^") + label + R"(\s+([0-9.]+)\s+ms)",
+                std::regex::icase | std::regex::multiline);
+  std::smatch m;
+  if (std::regex_search(txt, m, re)) return std::stod(m[1]);
+  return -1.0;
+}
+
+// ------------------------ PhaseObserver để tách đúng ranh giới ------------------------
+struct SplitObserver : public MOTION::PhaseObserver {
+  MOTION::Communication::CommunicationLayer& cl;
+  Clock::time_point t_pre_start{};
+  Clock::time_point t_pre_end{};
+  CommDelta comm_pre{};
+  bool got_pre{false};
+
+  explicit SplitObserver(MOTION::Communication::CommunicationLayer& ref) : cl(ref) {}
+
+  void on_preprocessing_done() override {
+    t_pre_end = Clock::now();
+    comm_pre = get_comm_delta_and_reset(cl); // chốt communication của preprocessing
+    got_pre = true;
+  }
+  // on_online_done() không bắt buộc dùng ở wrapper này
+};
+
+// ------------------------ CLI ------------------------
 static std::optional<Options> parse_cli(int argc, char** argv) {
   Options opt;
   po::options_description desc("Exact PM (assessed) options");
@@ -217,11 +235,9 @@ static std::optional<Options> parse_cli(int argc, char** argv) {
     ("repetitions", po::value<std::size_t>()->default_value(1), "Repetitions")
     ("sync-between-setup-and-online", po::bool_switch()->default_value(false),
        "Insert a sync point between preprocessing and online")
-    // workload
     ("pattern-size", po::value<std::uint64_t>()->default_value(10), "Pattern length")
     ("text-size", po::value<std::uint64_t>()->default_value(256), "Text length")
     ("ring-size", po::value<std::uint64_t>()->default_value(16), "Ring size")
-    // generator
     ("alpha-patterns", po::bool_switch()->default_value(true), "Use a-z generator")
     ("num-patterns", po::value<std::size_t>()->default_value(1024), "Number of patterns")
     ("patt-seed", po::value<uint64_t>()->default_value(123456), "Pattern seed")
@@ -230,10 +246,7 @@ static std::optional<Options> parse_cli(int argc, char** argv) {
   po::variables_map vm;
   try {
     po::store(po::parse_command_line(argc, argv, desc), vm);
-    if (vm["help"].as<bool>()) {
-      std::cout << desc << "\n";
-      return std::nullopt;
-    }
+    if (vm["help"].as<bool>()) { std::cout << desc << "\n"; return std::nullopt; }
     po::notify(vm);
   } catch (const std::exception& e) {
     std::cerr << "CLI error: " << e.what() << "\n" << desc << "\n";
@@ -259,10 +272,7 @@ static std::optional<Options> parse_cli(int argc, char** argv) {
   opt.tcp_config.resize(2);
   auto [id0, c0] = parse_party_argument(party_infos[0]);
   auto [id1, c1] = parse_party_argument(party_infos[1]);
-  if (id0 == id1) {
-    std::cerr << "party ids must differ (0 and 1)\n";
-    return std::nullopt;
-  }
+  if (id0 == id1) { std::cerr << "party ids must differ (0 and 1)\n"; return std::nullopt; }
   opt.tcp_config[id0] = c0; opt.tcp_config[id1] = c1;
 
   opt.threads = vm["threads"].as<std::size_t>();
@@ -284,128 +294,80 @@ static std::optional<Options> parse_cli(int argc, char** argv) {
   return opt;
 }
 
-static double extract_ms(const std::string& txt, const char* label) {
-  std::regex re(std::string("^") + label + R"(\s+([0-9.]+)\s+ms)",
-                std::regex::icase | std::regex::multiline);
-  std::smatch m;
-  if (std::regex_search(txt, m, re)) return std::stod(m[1]);
-  return -1.0; 
-}
-
+// ------------------------ main ------------------------
 int main(int argc, char** argv) {
   auto opt = parse_cli(argc, argv);
   if (!opt) return 1;
 
   try {
-    // ===== (i) SECRET SHARING / INPUT PREP =====
-    auto rss0 = get_rss_kb();
-    auto t0 = Clock::now();
+    // ===== (i) SECRET SHARING / INPUT PREP (local only) =====
+    const auto rss0 = get_rss_kb();
+    const auto t0 = Clock::now();
 
-    // generator (patterns/text) —
     if (opt->alpha_patterns) {
-      auto patt = make_alpha_patterns(opt->num_patterns, opt->pattern_size, opt->patt_seed);
-      auto text = make_alpha_text(opt->text_size, opt->text_seed);
-      // For log
-      if (opt->my_id == 0) {
-        std::cout << "[GEN] patterns=" << patt.size()
-                  << " len=" << opt->pattern_size
-                  << " | text_len=" << text.size() << "\n";
-      }
+      // chỉ tạo dữ liệu để có workload thực tế, không in log thừa
+      (void)make_alpha_patterns(opt->num_patterns, opt->pattern_size, opt->patt_seed);
+      (void)make_alpha_text(opt->text_size, opt->text_seed);
     }
 
-    // Create wires
-    auto in_bool = make_boolean_inputs_for_pm(*opt);
-    auto in_rhs  = make_eqexp_rhs_wire(*opt);
+    const auto in_bool = make_boolean_inputs_for_pm(*opt);
+    const auto in_rhs  = make_eqexp_rhs_wire(*opt);
 
-    auto t1 = Clock::now();
-    auto secret_share_dur = t1 - t0;
+    const auto t1 = Clock::now();
+    const auto secret_share_dur = t1 - t0;
 
-    // ===== comm layer & logger =====
+    // ===== comm layer & backend =====
     auto comm = setup_communication(*opt);
     auto logger = std::make_shared<MOTION::Logger>(opt->my_id,
                                                    boost::log::trivial::severity_level::trace);
     comm->set_logger(logger);
 
-    // Reset counters before jump into pre-processing
-    comm->reset_transport_statistics();
-
-    // ===== (ii) PRE-PROCESSING =====
-    auto rss1 = get_rss_kb();
-    auto t2 = Clock::now();
-
     MOTION::TwoPartyBackend backend(*comm, opt->threads,
                                     opt->sync_between_setup_and_online, logger);
 
-    // Build circuit exactly same with original (HAM -> EQEXP)
-    auto& gf_bool = backend.get_gate_factory(MOTION::MPCProtocol::BooleanBEAVY);
-    auto& gf_arith= backend.get_gate_factory(MOTION::MPCProtocol::ArithmeticBEAVY);
+    auto& gf_bool  = backend.get_gate_factory(MOTION::MPCProtocol::BooleanBEAVY);
+    auto& gf_arith = backend.get_gate_factory(MOTION::MPCProtocol::ArithmeticBEAVY);
     auto ham = gf_bool.make_unary_gate(ENCRYPTO::PrimitiveOperationType::HAM, in_bool);
-    auto out = gf_arith.make_binary_gate(ENCRYPTO::PrimitiveOperationType::EQEXP, ham, in_rhs);
+    (void)gf_arith.make_binary_gate(ENCRYPTO::PrimitiveOperationType::EQEXP, ham, in_rhs);
 
-    if (opt->sync_between_setup_and_online) comm->sync();
+    // ===== (ii) PREPROCESSING (real, inside run) + (iii) ONLINE =====
+    // Dùng PhaseObserver để tách đúng ranh giới
+    auto hook = std::make_shared<SplitObserver>(*comm);
+    hook->t_pre_start = Clock::now();
+    comm->reset_transport_statistics(); // counters sạch cho preprocessing
+    backend.set_phase_observer(hook);
 
-    auto t3 = Clock::now();
-    auto comm_pre = get_comm_delta_and_reset(*comm);
-    print_phase("secret_share", secret_share_dur, {/*no comm in local prep*/0,0,0,0}, rss0);
-    std::cout << "[ROUNDS PHASE] secret_share≈ " << 0 << std::endl;
+    const auto t_run_start = Clock::now();
+    backend.run();
+    const auto t_run_end   = Clock::now();
 
-    print_phase("preprocessing", t3 - t2, comm_pre, rss1);
-    std::cout << "[ROUNDS PHASE] preprocessing≈ "
-              << estimate_rounds_from_msgs(comm_pre) << std::endl;
+    // Sau callback on_preprocessing_done(): phần còn lại là ONLINE
+    const auto comm_online = get_comm_delta_and_reset(*comm);
 
-    // ===== (iii) ONLINE =====
-    auto rss2 = get_rss_kb();
-    auto t4 = Clock::now();
-    backend.run();  // run evaluate + reveal follow lib
-    auto t5 = Clock::now();
+    // ===== In 3 phase gọn gàng =====
+    print_phase("secret_share", secret_share_dur, {/*no comm*/0,0,0,0}, rss0);
 
-    // Collect General statistical (after run)
-    auto comm_online = get_comm_delta_and_reset(*comm);
-    print_phase("online", t5 - t4, comm_online, rss2);
-    std::cout << "[ROUNDS PHASE] online≈ "
-              << estimate_rounds_from_msgs(comm_online) << std::endl;
-
-    // ===== Extra: per-window stats & rounds proxy (print only) =====
-    {
-      const double num_windows = static_cast<double>(opt->text_size - opt->pattern_size + 1);
-
-      const double pre_bytes = static_cast<double>(comm_pre.bytes_sent) + static_cast<double>(comm_pre.bytes_recv);
-      const double pre_msgs  = static_cast<double>(comm_pre.msgs_sent)  + static_cast<double>(comm_pre.msgs_recv);
-      const double pre_bpw   = (num_windows > 0) ? pre_bytes / num_windows : 0.0;   // bytes per window
-      const double pre_mpw   = (num_windows > 0) ? pre_msgs  / num_windows : 0.0;   // msgs per window
-
-      const double on_bytes  = static_cast<double>(comm_online.bytes_sent) + static_cast<double>(comm_online.bytes_recv);
-      const double on_msgs   = static_cast<double>(comm_online.msgs_sent)  + static_cast<double>(comm_online.msgs_recv);
-      const double on_bpw    = (num_windows > 0) ? on_bytes / num_windows : 0.0;
-      const double on_mpw    = (num_windows > 0) ? on_msgs  / num_windows : 0.0;
-
-      const double on_rounds_proxy = (num_windows > 0) ? (on_mpw / 2.0) : 0.0;
-
-      std::cout << "[STATS] preprocessing_total_bytes=" << static_cast<uint64_t>(pre_bytes)
-                << " | preprocessing_total_msgs="      << static_cast<uint64_t>(pre_msgs)
-                << " | pre_bytes_per_window="          << pre_bpw
-                << " | pre_msgs_per_window="           << pre_mpw
-                << std::endl;
-
-      std::cout << "[STATS] online_total_bytes="       << static_cast<uint64_t>(on_bytes)
-                << " | online_total_msgs="             << static_cast<uint64_t>(on_msgs)
-                << " | online_bytes_per_window="       << on_bpw
-                << " | online_msgs_per_window="        << on_mpw
-                << " | online_rounds_proxy≈"           << on_rounds_proxy
-                << std::endl;
+    if (!hook->got_pre) {
+      std::cerr << "[WARN] PhaseObserver did not fire; cannot split preprocessing/online precisely.\n";
     }
+    const auto pre_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          hook->t_pre_end - hook->t_pre_start);
+    print_phase("preprocessing", pre_ms, hook->comm_pre, get_rss_kb());
 
-    // ===== Parse MOTION stats to get per-phase ms (offline/online) =====
+    const auto online_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             t_run_end - hook->t_pre_end);
+    print_phase("online", online_ms, comm_online, get_rss_kb());
+
+    // ===== MOTION stats (ms chuẩn theo thư viện) =====
     {
       MOTION::Statistics::AccumulatedRunTimeStats run_time_stats;
-      MOTION::Statistics::AccumulatedCommunicationStats comm_stats; 
+      MOTION::Statistics::AccumulatedCommunicationStats comm_stats;
       run_time_stats.add(backend.get_run_time_stats());
+      const auto stats_txt = MOTION::Statistics::print_stats("Exact Pattern Matching",
+                                                             run_time_stats, comm_stats);
 
-      auto stats_txt = MOTION::Statistics::print_stats("Exact Pattern Matching",
-                                                      run_time_stats, comm_stats);
-
-      const double ms_prep_total = extract_ms(stats_txt, "Preprocessing Total");
-      const double ms_gates_setup = extract_ms(stats_txt, "Gates Setup");
+      const double ms_prep_total   = extract_ms(stats_txt, "Preprocessing Total");
+      const double ms_gates_setup  = extract_ms(stats_txt, "Gates Setup");
       const double ms_gates_online = extract_ms(stats_txt, "Gates Online");
 
       std::cout << "[MOTION] preprocessing_ms=" << ms_prep_total
@@ -414,8 +376,6 @@ int main(int argc, char** argv) {
     }
 
     comm->shutdown();
-
-    // Can extend here for the Json print out
   } catch (const std::exception& e) {
     std::cerr << "ERROR: " << e.what() << "\n";
     return 2;
