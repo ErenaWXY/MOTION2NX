@@ -111,7 +111,7 @@ static CommDelta get_comm_delta_and_reset(MOTION::Communication::CommunicationLa
 }
 
 static uint64_t rounds_from(const CommDelta& c) {
-  // Upper bound thô: một "round" ~ ít nhất 1 thông điệp mỗi chiều
+
   return std::max(c.msgs_sent, c.msgs_recv);
 }
 
@@ -193,9 +193,9 @@ static void print_phase(const char* name,
             << std::endl;
 }
 
-// Bóc số ms (cột "mean") từ bảng stats của MOTION
+
 static double extract_ms(const std::string& txt, const char* label) {
-  // Ví dụ: "Preprocessing Total   8151.048 ms      0.000 ms      0.000 ms"
+
   std::regex re(std::string("^") + label + R"(\s+([0-9.]+)\s+ms)",
                 std::regex::icase | std::regex::multiline);
   std::smatch m;
@@ -203,7 +203,7 @@ static double extract_ms(const std::string& txt, const char* label) {
   return -1.0;
 }
 
-// ------------------------ PhaseObserver để tách đúng ranh giới ------------------------
+
 struct SplitObserver : public MOTION::PhaseObserver {
   MOTION::Communication::CommunicationLayer& cl;
   Clock::time_point t_pre_start{};
@@ -215,10 +215,10 @@ struct SplitObserver : public MOTION::PhaseObserver {
 
   void on_preprocessing_done() override {
     t_pre_end = Clock::now();
-    comm_pre = get_comm_delta_and_reset(cl); // chốt communication của preprocessing
+    comm_pre = get_comm_delta_and_reset(cl);
     got_pre = true;
   }
-  // on_online_done() không bắt buộc dùng ở wrapper này
+
 };
 
 // ------------------------ CLI ------------------------
@@ -305,7 +305,7 @@ int main(int argc, char** argv) {
     const auto t0 = Clock::now();
 
     if (opt->alpha_patterns) {
-      // chỉ tạo dữ liệu để có workload thực tế, không in log thừa
+  
       (void)make_alpha_patterns(opt->num_patterns, opt->pattern_size, opt->patt_seed);
       (void)make_alpha_text(opt->text_size, opt->text_seed);
     }
@@ -331,20 +331,20 @@ int main(int argc, char** argv) {
     (void)gf_arith.make_binary_gate(ENCRYPTO::PrimitiveOperationType::EQEXP, ham, in_rhs);
 
     // ===== (ii) PREPROCESSING (real, inside run) + (iii) ONLINE =====
-    // Dùng PhaseObserver để tách đúng ranh giới
+
     auto hook = std::make_shared<SplitObserver>(*comm);
     hook->t_pre_start = Clock::now();
-    comm->reset_transport_statistics(); // counters sạch cho preprocessing
+    comm->reset_transport_statistics();
     backend.set_phase_observer(hook);
 
     const auto t_run_start = Clock::now();
     backend.run();
     const auto t_run_end   = Clock::now();
 
-    // Sau callback on_preprocessing_done(): phần còn lại là ONLINE
+    
     const auto comm_online = get_comm_delta_and_reset(*comm);
 
-    // ===== In 3 phase gọn gàng =====
+ 
     print_phase("secret_share", secret_share_dur, {/*no comm*/0,0,0,0}, rss0);
 
     if (!hook->got_pre) {
@@ -358,7 +358,7 @@ int main(int argc, char** argv) {
                              t_run_end - hook->t_pre_end);
     print_phase("online", online_ms, comm_online, get_rss_kb());
 
-    // ===== MOTION stats (ms chuẩn theo thư viện) =====
+    // ===== MOTION stats  =====
     {
       MOTION::Statistics::AccumulatedRunTimeStats run_time_stats;
       MOTION::Statistics::AccumulatedCommunicationStats comm_stats;

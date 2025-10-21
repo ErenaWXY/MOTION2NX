@@ -56,18 +56,17 @@ TwoPartyBackend::TwoPartyBackend(Communication::CommunicationLayer& comm_layer,
       gate_register_(std::make_unique<GateRegister>()),
       gate_executor_(std::make_unique<NewGateExecutor>(
           *gate_register_,
-          // Preprocessing lambda: chạy setup; nếu KHÔNG có sync giữa setup/online,
-          // gọi observer ngay tại đây (mốc sau preprocessing).
+          // Preprocessing lambda: run setup;
           [this, sync_between_setup_and_online] {
             run_preprocessing();
             if (!sync_between_setup_and_online) {
               if (phase_observer_) phase_observer_->on_preprocessing_done();
             }
           },
-          // Cờ sync-between-setup-and-online (NewGateExecutor sẽ gọi sync_cb nếu true)
+          //  sync-between-setup-and-online (NewGateExecutor call sync_cb if true)
           sync_between_setup_and_online,
-          // Sync lambda: thực hiện sync; NẾU có sync thì mốc "preprocessing done"
-          // được đặt NGAY SAU sync (trước khi vào online).
+          // Sync lambda: do sync; if have sync then "preprocessing done"
+          // after sync (before online).
           [this] {
             comm_layer_.sync();
             if (phase_observer_) phase_observer_->on_preprocessing_done();
