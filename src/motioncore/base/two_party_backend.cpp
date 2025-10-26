@@ -56,19 +56,27 @@ TwoPartyBackend::TwoPartyBackend(Communication::CommunicationLayer& comm_layer,
       gate_register_(std::make_unique<GateRegister>()),
       gate_executor_(std::make_unique<NewGateExecutor>(
           *gate_register_,
-          // Preprocessing lambda: run setup;
+          // Preprocessing lambda:
+          //   Run the setup/preprocessing phase. If NO explicit synchronization between
+          //   setup and online is requested (sync_between_setup_and_online == false),
+          //   we notify the PhaseObserver *right here* to mark "preprocessing done".
           [this, sync_between_setup_and_online] {
             run_preprocessing();
             if (!sync_between_setup_and_online) {
+              // --- PhaseObserver hook #1 (end of preprocessing WITHOUT extra sync) ---
               if (phase_observer_) phase_observer_->on_preprocessing_done();
             }
           },
-          //  sync-between-setup-and-online (NewGateExecutor call sync_cb if true)
+          // The "sync_between_setup_and_online" flag:
+          //   If true, NewGateExecutor will call the sync callback below between setup and online.
           sync_between_setup_and_online,
-          // Sync lambda: do sync; if have sync then "preprocessing done"
-          // after sync (before online).
+          // Sync callback between setup and online:
+          //   Perform an explicit communication layer sync. If the user requested this
+          //   separation, we place the "preprocessing done" marker *right after* the sync,
+          //   i.e., just before we enter the online phase.
           [this] {
             comm_layer_.sync();
+            // --- PhaseObserver hook #1 (end of preprocessing WITH extra sync) ---
             if (phase_observer_) phase_observer_->on_preprocessing_done();
           },
           num_threads, logger_)),
@@ -98,11 +106,14 @@ TwoPartyBackend::TwoPartyBackend(Communication::CommunicationLayer& comm_layer,
       yao_provider_(std::make_unique<proto::yao::YaoProvider>(
           comm_layer_, *gate_register_, *circuit_loader_, *motion_base_provider_,
           ot_manager_->get_provider(1 - my_id_), logger_)) {
+  // Register factories for all supported protocols:
   gate_factories_.emplace(MPCProtocol::ArithmeticBEAVY, *beavy_provider_);
   gate_factories_.emplace(MPCProtocol::BooleanBEAVY, *beavy_provider_);
   gate_factories_.emplace(MPCProtocol::ArithmeticGMW, *gmw_provider_);
   gate_factories_.emplace(MPCProtocol::BooleanGMW, *gmw_provider_);
   gate_factories_.emplace(MPCProtocol::Yao, *yao_provider_);
+
+  // Start the communication layer immediately.
   comm_layer_.start();
 }
 
@@ -113,8 +124,10 @@ void TwoPartyBackend::set_phase_observer(std::shared_ptr<PhaseObserver> obs) {
 }
 
 void TwoPartyBackend::run_preprocessing() {
+  // Record start/end of the preprocessing section in timing stats.
   run_time_stats_.back().record_start<Statistics::RunTimeStats::StatID::preprocessing>();
 
+  // Setup all cryptographic and protocol providers that participate in preprocessing.
   motion_base_provider_->setup();
   base_ot_provider_->ComputeBaseOTs();
   mt_provider_->PreSetup();
@@ -132,7 +145,12 @@ void TwoPartyBackend::run_preprocessing() {
 }
 
 void TwoPartyBackend::run() {
+  // Evaluate both setup and online (the executor will invoke the callbacks we passed
+  // in the constructor to separate the two phases if requested).
   gate_executor_->evaluate_setup_online(run_time_stats_.back());
+
+  // --- PhaseObserver hook #2 (end of online) ---
+  // This is called AFTER the online phase has completed.
   if (phase_observer_) phase_observer_->on_online_done();
 }
 
