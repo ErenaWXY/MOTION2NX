@@ -20,8 +20,6 @@ add_subdirectory(wildcard_pm)
 add_subdirectory(mult)
 add_subdirectory(naive)
 add_subdirectory(naive_exact_pm)
-add_subdirectory(naive_wildcard_pm)
-add_subdirectory(naive_approx_pm)
 
 
 if (MOTION_BUILD_ONNX_ADAPTER)
